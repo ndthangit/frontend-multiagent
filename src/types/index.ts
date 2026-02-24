@@ -55,3 +55,11 @@ export interface Agent {
   lastRun?: Date;
   runCount: number;
 }
+export interface Document {
+  id: string;
+  fileName: string;
+  fileType: string;
+  fileSize: number;
+  status: 'uploading' | 'processing' | 'ready' | 'error';
+  uploadDate: Date;
+}
