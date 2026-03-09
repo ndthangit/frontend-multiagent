@@ -7,6 +7,7 @@ import StatusIndicator from '../components/StatusIndicator';
 import Toast from '../components/Toast';
 import { pastConversations, currentConversation } from '../data/mockData';
 import type { Document } from '../types';
+import { request } from '../api';
 import '../App.css';
 
 export default function DashboardPage() {
@@ -28,36 +29,85 @@ export default function DashboardPage() {
     setToast({ ...toast, visible: false });
   };
 
-  const handleUploadDocuments = (files: FileList) => {
-    const newDocuments: Document[] = Array.from(files).map(file => ({
-      id: Math.random().toString(36).substr(2, 9),
+  const handleUploadDocuments = async (files: FileList) => {
+    const fileArray = Array.from(files);
+
+    // Thêm tất cả file vào state với trạng thái 'uploading'
+    const newDocuments: Document[] = fileArray.map(file => ({
+      id: Math.random().toString(36).substr(2, 9), // tempId, sẽ được thay bằng document_id từ server
       fileName: file.name,
       fileType: file.type || file.name.split('.').pop() || 'unknown',
       fileSize: file.size,
-      status: 'processing' as const,
+      status: 'uploading' as const,
       uploadDate: new Date()
     }));
 
     setDocuments(prev => [...prev, ...newDocuments]);
 
-    setToast({
-      visible: true,
-      message: `${files.length} document${files.length > 1 ? 's' : ''} uploaded successfully!`,
-      type: 'success'
-    });
+    let successCount = 0;
+    let errorCount = 0;
+
+    // Backend nhận từng file một qua field 'file'
+    await Promise.all(
+      fileArray.map(async (file, index) => {
+        const tempId = newDocuments[index].id;
+        const formData = new FormData();
+        formData.append('file', file);
+
+        await request<{ message: string; document_id: string }>(
+          'POST',
+          '/v1/retrieval/upload',
+          (res) => {
+            const documentId = res.data?.document_id ?? tempId;
+            setDocuments(prev =>
+              prev.map(doc =>
+                doc.id === tempId
+                  ? { ...doc, id: documentId, status: 'processing' as const }
+                  : doc
+              )
+            );
+            successCount++;
+          },
+          {
+            rest: () => {
+              setDocuments(prev =>
+                prev.map(doc =>
+                  doc.id === tempId ? { ...doc, status: 'error' as const } : doc
+                )
+              );
+              errorCount++;
+            },
+            noResponse: () => {
+              setDocuments(prev =>
+                prev.map(doc =>
+                  doc.id === tempId ? { ...doc, status: 'error' as const } : doc
+                )
+              );
+              errorCount++;
+            }
+          },
+          formData as unknown as never,
+          { headers: { 'Content-Type': 'multipart/form-data' } }
+        );
+      })
+    );
+
+    if (successCount > 0) {
+      setToast({
+        visible: true,
+        message: `${successCount} document${successCount > 1 ? 's' : ''} uploaded successfully${errorCount > 0 ? `, ${errorCount} failed` : ''}!`,
+        type: errorCount > 0 ? 'info' : 'success'
+      });
+    } else {
+      setToast({
+        visible: true,
+        message: 'Upload failed. Please try again.',
+        type: 'error'
+      });
+    }
 
     setTimeout(() => {
-      setDocuments(prev =>
-        prev.map(doc =>
-          newDocuments.find(nd => nd.id === doc.id) && doc.status === 'processing'
-            ? { ...doc, status: 'ready' as const }
-            : doc
-        )
-      );
-    }, 2000);
-
-    setTimeout(() => {
-      setToast({ ...toast, visible: false });
+      setToast(prev => ({ ...prev, visible: false }));
     }, 3000);
   };
 
