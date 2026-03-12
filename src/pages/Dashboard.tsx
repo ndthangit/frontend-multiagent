@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import TaskHistory from '../components/TaskHistory';
 import ChatInterface from '../components/ChatInterface';
@@ -9,6 +9,7 @@ import { pastConversations, currentConversation } from '../data/mockData';
 import type { Document } from '../types';
 import { request } from '../api';
 import '../App.css';
+import { fetchEventSource } from '@microsoft/fetch-event-source';
 
 export default function DashboardPage() {
   const navigate = useNavigate();
@@ -25,6 +26,75 @@ export default function DashboardPage() {
     message: ''
   };
 
+  // Quản lý các AbortController cho kết nối SSE
+  const sseControllers = useRef<Map<string, AbortController>>(new Map());
+
+  // Dọn dẹp kết nối SSE khi unmount component
+  useEffect(() => {
+    return () => {
+      sseControllers.current.forEach(controller => controller.abort());
+      sseControllers.current.clear();
+    };
+  }, []);
+
+  const startSSE = async (documentId: string, tempId: string) => {
+    if (sseControllers.current.has(documentId)) return;
+
+    const token = localStorage.getItem('access_token');
+
+    console.log(`Starting SSE for document ${documentId} with token:`, token);
+    const controller = new AbortController();
+    sseControllers.current.set(documentId, controller);
+
+    try {
+      await fetchEventSource(`http://localhost:8000/v1/retrieval/sse/${documentId}`, {
+        method: 'GET',
+        headers: {
+          Authorization: token ? `Bearer ${token}` : '',
+          Accept: 'text/event-stream'
+        },
+        signal: controller.signal,
+
+        onmessage(event) {
+          try {
+            const data = JSON.parse(event.data);
+
+            if (['completed', 'error', 'unsupported'].includes(data.status)) {
+              const newStatus = data.status === 'completed' ? ('ready' as const) : ('error' as const);
+
+              setDocuments(prev =>
+                prev.map(doc =>
+                  doc.id === documentId || doc.id === tempId
+                    ? { ...doc, id: documentId, status: newStatus }
+                    : doc
+                )
+              );
+
+              controller.abort();
+              sseControllers.current.delete(documentId);
+            }
+          } catch (e) {
+            console.error('[SSE] failed to parse message:', event.data, e);
+          }
+        },
+
+        onerror(err) {
+          console.error('[SSE] Connection error:', err);
+          setDocuments(prev =>
+            prev.map(doc =>
+              doc.id === documentId || doc.id === tempId ? { ...doc, status: 'error' as const } : doc
+            )
+          );
+          controller.abort();
+          sseControllers.current.delete(documentId);
+          throw err; // chặn reconnect vô hạn
+        }
+      });
+    } catch (error) {
+      console.log('SSE aborted or failed', error);
+    }
+  };
+
   const handleToastClose = () => {
     setToast({ ...toast, visible: false });
   };
@@ -32,9 +102,8 @@ export default function DashboardPage() {
   const handleUploadDocuments = async (files: FileList) => {
     const fileArray = Array.from(files);
 
-    // Thêm tất cả file vào state với trạng thái 'uploading'
     const newDocuments: Document[] = fileArray.map(file => ({
-      id: Math.random().toString(36).substr(2, 9), // tempId, sẽ được thay bằng document_id từ server
+      id: Math.random().toString(36).substr(2, 9),
       fileName: file.name,
       fileType: file.type || file.name.split('.').pop() || 'unknown',
       fileSize: file.size,
@@ -47,7 +116,6 @@ export default function DashboardPage() {
     let successCount = 0;
     let errorCount = 0;
 
-    // Backend nhận từng file một qua field 'file'
     await Promise.all(
       fileArray.map(async (file, index) => {
         const tempId = newDocuments[index].id;
@@ -66,6 +134,10 @@ export default function DashboardPage() {
                   : doc
               )
             );
+            
+            // 4. Gọi hàm khởi tạo SSE thay vì WebSocket
+            startSSE(documentId, tempId);
+            
             successCount++;
           },
           {
